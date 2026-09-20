@@ -328,26 +328,61 @@ src="https://www.facebook.com/tr?id=1392605305778743&ev=PageView&noscript=1"
   // used at click time below.
 
   // ---- Click-time genuine-click gate ----
-  btn.addEventListener("click", function(e){
-    var isHuman = e.isTrusted === true;
-    var dwellOk = dwellPassed;
-    var alreadyFired = false;
+  // We do NOT fire the pixel here anymore. Firing on click alone counts every
+  // tap as a "Lead" even when Telegram never actually opens (in-app browser
+  // blocks the deep link, app not installed, intent:// fails, etc). Instead we
+  // arm a short "waiting for app switch" window and only fire once we get real
+  // evidence the OS left this page for another app (Telegram).
+  var APP_SWITCH_WINDOW_MS = 2500;
+  var clickArmed = false;
+  var clickTimer = null;
 
+  function fireLeadIfEligible(reason){
+    var alreadyFired = false;
     try {
       alreadyFired = sessionStorage.getItem(SESSION_KEY) === "1";
     } catch (err) { /* sessionStorage unavailable, fall through */ }
 
-    // Real <a href> tag, no preventDefault, no setTimeout delay before navigation —
-    // this preserves the mobile "user activation" needed for the Telegram app hand-off.
-    if (isHuman && dwellOk && !alreadyFired && !eventFired) {
+    if (!eventFired && !alreadyFired) {
       eventFired = true;
       try { sessionStorage.setItem(SESSION_KEY, "1"); } catch (err) {}
       if (typeof fbq === "function") {
         fbq("track", PIXEL_EVENT);
       }
     }
+  }
+
+  btn.addEventListener("click", function(e){
+    var isHuman = e.isTrusted === true;
+    var dwellOk = dwellPassed;
+
+    // Real <a href> tag, no preventDefault, no setTimeout delay before navigation —
+    // this preserves the mobile "user activation" needed for the Telegram app hand-off.
+    if (isHuman && dwellOk && !eventFired) {
+      clickArmed = true;
+      // Safety net: if we never detect an app switch (visibilitychange/pagehide)
+      // within this window, we assume the hand-off failed silently and we do
+      // NOT count it as a Lead — this is the main source of the fake leads.
+      clickTimer = setTimeout(function(){
+        clickArmed = false;
+      }, APP_SWITCH_WINDOW_MS);
+    }
     // Navigation proceeds natively via the anchor's href — never blocked or delayed.
   });
+
+  // ---- App-switch confirmation (this is what actually fires the pixel) ----
+  // When the phone genuinely hands off to the Telegram app, the browser tab
+  // gets backgrounded almost immediately — that's what these listeners catch.
+  function onPossibleAppSwitch(){
+    if (clickArmed) {
+      fireLeadIfEligible("app-switch");
+    }
+  }
+  document.addEventListener("visibilitychange", function(){
+    if (document.hidden) onPossibleAppSwitch();
+  });
+  window.addEventListener("pagehide", onPossibleAppSwitch);
+  window.addEventListener("blur", onPossibleAppSwitch);
 
   // ---- In-app browser detection (Facebook / Instagram webviews) ----
   var ua = navigator.userAgent || "";
